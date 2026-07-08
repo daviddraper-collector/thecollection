@@ -196,10 +196,11 @@ const SCHEMAS = {
 // ── Firebase helpers ──────────────────────────────────────────────────────────
 const blankCatalog = () => Object.fromEntries(DEFAULT_ORDER.map(k=>[k,[]]));
 const blankState   = () => ({
-  catalog: blankCatalog(),
-  order:   [...DEFAULT_ORDER],
-  hidden:  [],
-  token:   "",
+  catalog:    blankCatalog(),
+  order:      [...DEFAULT_ORDER],
+  hidden:     [],
+  token:      "",
+  tmdbToken:  "",
 });
 
 async function fbLoad() {
@@ -223,9 +224,10 @@ async function fbLoad() {
     });
     return {
       catalog,
-      order:  d.order  || [...DEFAULT_ORDER],
-      hidden: d.hidden || [],
-      token:  d.token  || "",
+      order:     d.order     || [...DEFAULT_ORDER],
+      hidden:    d.hidden    || [],
+      token:     d.token     || "",
+      tmdbToken: d.tmdbToken || "",
     };
   }
   return blankState();
@@ -267,6 +269,71 @@ function mapDiscogs(result,tabKey){
   if(["dvd","vhs"].includes(tabKey))
     return{...base,title:album||raw,year,directors:[],cast:[],genres,format:tabKey==="dvd"?"DVD":"VHS",rating:"NR",condition:"",notes:""};
   return{...base,album,year,label,catNo,genres,condition:"",notes:""};
+}
+
+// ── TMDb ──────────────────────────────────────────────────────────────────────
+const TMDB_GENRES={
+  28:"Action",12:"Adventure",16:"Animation",35:"Comedy",80:"Crime",
+  99:"Documentary",18:"Drama",10751:"Family",14:"Fantasy",36:"History",
+  27:"Horror",10402:"Music",9648:"Mystery",10749:"Romance",878:"Science Fiction",
+  10770:"TV Movie",53:"Thriller",10752:"War",37:"Western"
+};
+
+async function upcToTitle(barcode){
+  // UPCitemdb free tier — gets product name from UPC, which we use to search TMDb
+  const r=await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(barcode)}`);
+  if(!r.ok) return null;
+  const data=await r.json();
+  const title=(data.items||[])[0]?.title;
+  if(!title) return null;
+  // Strip format descriptors like "[Blu-ray]", "(DVD)", "(Widescreen)", etc.
+  return title.replace(/\s*[\[\(](blu-?ray|dvd|4k\s*uhd|uhd|hd dvd|vhs|widescreen|fullscreen|special\s*edition|collector|extended|theatrical|unrated|director)[^\]\)]*[\]\)]/gi,"").trim();
+}
+
+async function tmdbSearch(query,tmdbToken){
+  const r=await fetch(
+    `https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(query)}&include_adult=false&per_page=6`,
+    {headers:{"Authorization":`Bearer ${tmdbToken}`,"Content-Type":"application/json"}}
+  );
+  if(!r.ok) throw new Error(`TMDb ${r.status}`);
+  return((await r.json()).results||[]).slice(0,6);
+}
+
+async function tmdbCredits(movieId,tmdbToken){
+  const r=await fetch(
+    `https://api.themoviedb.org/3/movie/${movieId}/credits`,
+    {headers:{"Authorization":`Bearer ${tmdbToken}`}}
+  );
+  if(!r.ok) return{directors:[],cast:[]};
+  const data=await r.json();
+  const directors=(data.crew||[]).filter(p=>p.job==="Director").map(p=>p.name);
+  const cast=(data.cast||[]).slice(0,8).map(p=>p.name);
+  return{directors,cast};
+}
+
+async function tmdbRating(movieId,tmdbToken){
+  const r=await fetch(
+    `https://api.themoviedb.org/3/movie/${movieId}/release_dates`,
+    {headers:{"Authorization":`Bearer ${tmdbToken}`}}
+  );
+  if(!r.ok) return"NR";
+  const data=await r.json();
+  const us=(data.results||[]).find(x=>x.iso_3166_1==="US");
+  const cert=(us?.release_dates||[]).find(x=>x.certification)?.certification||"NR";
+  return cert||"NR";
+}
+
+function mapTMDb(result,credits={},rating="NR"){
+  return{
+    id:crypto.randomUUID(),status:"have",stars:0,
+    title:result.title||"",
+    year:(result.release_date||"").slice(0,4),
+    directors:credits.directors||[],
+    cast:credits.cast||[],
+    genres:(result.genre_ids||[]).map(id=>TMDB_GENRES[id]).filter(Boolean),
+    format:"Blu-Ray",is3D:false,
+    rating,condition:"",notes:""
+  };
 }
 
 // ── TagInput ──────────────────────────────────────────────────────────────────
@@ -465,6 +532,25 @@ function DiscogsPicker({results,tabKey,onSelect,onClose}){
   );
 }
 
+// ── TMDb Picker ───────────────────────────────────────────────────────────────
+function TmdbPicker({results,onSelect,onClose}){
+  return(
+    <div className="overlay" onClick={onClose}>
+      <div className="picker-modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-header"><span>Select the right match</span><button className="btn-icon" onClick={onClose}>✕</button></div>
+        <div className="picker-list">
+          {results.map((r,i)=>(
+            <button key={i} className="picker-item" onClick={()=>onSelect(r)}>
+              <span className="picker-title">{r.title}</span>
+              <span className="picker-sub">{[(r.release_date||"").slice(0,4),r.genre_ids?.slice(0,2).map(id=>TMDB_GENRES[id]).filter(Boolean).join(", ")].filter(Boolean).join(" · ")}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Browse Panel ──────────────────────────────────────────────────────────────
 function BrowsePanel({schema,tagIndex,activeFilter,onTagClick,onClose}){
   const fieldLabels=Object.fromEntries(schema.fields.map(f=>[f.key,f.label]));
@@ -517,7 +603,7 @@ function mapDraftToSchema(draft, toKey) {
 }
 
 // ── Add Panel ─────────────────────────────────────────────────────────────────
-function AddPanel({tabKey,onAdd,onClose,discogsToken,allSuggestions,catalog}){
+function AddPanel({tabKey,onAdd,onClose,discogsToken,tmdbToken,allSuggestions,catalog}){
   const [targetTab, setTargetTab] = useState(tabKey);
   const targetSchema = SCHEMAS[targetTab];
   const [draft,   setDraft]   = useState(targetSchema.blankRecord());
@@ -541,15 +627,46 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,allSuggestions,catalog}){
     return targetRecords.find(r=>targetSchema.summaryLine(r).trim().toLowerCase()===dl)||null;
   },[draft,targetRecords,targetSchema]);
 
+  const isVideo = ["dvd","vhs"].includes(targetTab);
+
   const handleBarcode=async bc=>{
     setScanning(false);setLookup("loading");setMsg(`Looking up ${bc}…`);
     try{
-      const res=await discogsLookup(bc,discogsToken);
-      if(!res.length){setLookup("error");setMsg("No Discogs match — fill in manually.");}
-      else if(res.length===1){applyResult(mapDiscogs(res[0],targetTab));}
-      else{setResults(res);setLookup("pick");}
+      if(isVideo && tmdbToken){
+        // Video tab — UPC → title → TMDb
+        setMsg(`Finding title for ${bc}…`);
+        const title=await upcToTitle(bc);
+        if(!title){
+          setLookup("error");
+          setMsg("Barcode not found in product database — search by title or enter manually.");
+          return;
+        }
+        setMsg(`Searching TMDb for "${title}"…`);
+        const res=await tmdbSearch(title,tmdbToken);
+        if(!res.length){setLookup("error");setMsg(`No TMDb match for "${title}" — fill in manually.`);return;}
+        if(res.length===1){await applyTMDb(res[0]);}
+        else{setResults(res);setLookup("pick-tmdb");}
+      } else {
+        // Music tab — Discogs
+        const res=await discogsLookup(bc,discogsToken);
+        if(!res.length){setLookup("error");setMsg("No Discogs match — fill in manually.");}
+        else if(res.length===1){applyResult(mapDiscogs(res[0],targetTab));}
+        else{setResults(res);setLookup("pick");}
+      }
     }catch(e){setLookup("error");setMsg(`Lookup failed: ${e.message}`);}
   };
+
+  const applyTMDb=async result=>{
+    setLookup("loading");setMsg("Fetching cast and crew…");
+    try{
+      const [credits,rating]=await Promise.all([
+        tmdbCredits(result.id,tmdbToken),
+        tmdbRating(result.id,tmdbToken),
+      ]);
+      applyResult(mapTMDb(result,credits,rating));
+    }catch{applyResult(mapTMDb(result));}
+  };
+
   const applyResult=mapped=>{setDraft(d=>({...d,...mapped,id:d.id}));setResults([]);setLookup(null);setMsg("");setFullMode(true);};
   const visibleFields=fullMode?targetSchema.fields:targetSchema.fields.filter(f=>targetSchema.quickFields.includes(f.key));
 
@@ -605,6 +722,7 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,allSuggestions,catalog}){
       </div>
       {scanning&&<BarcodeScanner onDetect={handleBarcode} onClose={()=>setScanning(false)}/>}
       {lookup==="pick"&&<DiscogsPicker results={results} tabKey={targetTab} onSelect={applyResult} onClose={()=>setLookup(null)}/>}
+      {lookup==="pick-tmdb"&&<TmdbPicker results={results} onSelect={r=>{setLookup(null);applyTMDb(r);}} onClose={()=>setLookup(null)}/>}
     </>
   );
 }
@@ -727,10 +845,11 @@ function RecordCard({record,schema,onUpdate,onDelete,onTagClick,af,allSuggestion
 }
 
 // ── Settings Panel ────────────────────────────────────────────────────────────
-function SettingsPanel({order,hidden,token,catalog,onSave,onImport,onClose}){
+function SettingsPanel({order,hidden,token,tmdbToken,catalog,onSave,onImport,onClose}){
   const [lo,setLo]=useState([...order]);
   const [lh,setLh]=useState([...hidden]);
   const [lt,setLt]=useState(token);
+  const [ltmdb,setLtmdb]=useState(tmdbToken||"");
   const [importErr,setImportErr]=useState("");
   const fileRef=useRef();
   const move=(i,dir)=>{const j=i+dir;if(j<0||j>=lo.length)return;const n=[...lo];[n[i],n[j]]=[n[j],n[i]];setLo(n);};
@@ -908,6 +1027,12 @@ function SettingsPanel({order,hidden,token,catalog,onSave,onImport,onClose}){
         </div>
         <p className="settings-hint">Free at <strong>discogs.com/settings/developers</strong></p>
 
+        <div className="settings-section-label">TMDb API Token</div>
+        <div className="token-row">
+          <input className="f-input" type="password" placeholder="Paste your TMDb Bearer token…" value={ltmdb} onChange={e=>setLtmdb(e.target.value)}/>
+        </div>
+        <p className="settings-hint">Free at <strong>themoviedb.org/settings/api</strong><br/>Required for DVD/VHS barcode lookups.</p>
+
         <div className="settings-section-label">Backup &amp; Restore</div>
         <div className="export-row">
           <button className="btn-export" onClick={exportJSON}>⬇ Export JSON</button>
@@ -921,7 +1046,7 @@ function SettingsPanel({order,hidden,token,catalog,onSave,onImport,onClose}){
         <p className="settings-hint">JSON export is a full backup — restores everything.<br/>Excel export gives each media type its own tab — cleanest for viewing.<br/>CSV export is one flat table — simplest, but mixes all types together.</p>
 
         <div className="order-footer">
-          <button className="btn-save" onClick={()=>{onSave(lo,lh,lt);onClose();}}>Save Settings</button>
+          <button className="btn-save" onClick={()=>{onSave(lo,lh,lt,ltmdb);onClose();}}>Save Settings</button>
           <button className="btn-cancel" onClick={onClose}>Cancel</button>
         </div>
       </div>
@@ -935,6 +1060,7 @@ function App(){
   const [order,      setOrder]      = useState(DEFAULT_ORDER);
   const [hidden,     setHidden]     = useState([]);
   const [token,      setToken]      = useState("");
+  const [tmdbToken,  setTmdbToken]  = useState("");
   const [loaded,     setLoaded]     = useState(false);
   const [syncing,    setSyncing]    = useState(false);
   const [syncErr,    setSyncErr]    = useState("");
@@ -964,6 +1090,7 @@ function App(){
         setOrder(data.order);
         setHidden(data.hidden);
         setToken(data.token);
+        setTmdbToken(data.tmdbToken||"");
         setActiveTab(data.order.find(k=>!data.hidden.includes(k))||data.order[0]);
       }catch(e){
         setSyncErr("Cloud load failed — working offline");
@@ -983,7 +1110,7 @@ function App(){
     const timer=setTimeout(async()=>{
       setSyncing(true);
       try{
-        await fbSave({catalog,order,hidden,token});
+        await fbSave({catalog,order,hidden,token,tmdbToken});
         setFlash(true);setTimeout(()=>setFlash(false),1200);
         setSyncErr("");
       }catch(e){
@@ -991,7 +1118,7 @@ function App(){
       }finally{setSyncing(false);}
     },1500);
     return()=>clearTimeout(timer);
-  },[catalog,order,hidden,token,loaded]);
+  },[catalog,order,hidden,token,tmdbToken,loaded]);
 
   const schema      = SCHEMAS[activeTab]||SCHEMAS.vinyl;
   const records     = catalog[activeTab]||[];
@@ -1050,8 +1177,8 @@ function App(){
 
   const tagClick=(field,value)=>{setFilter(f=>(f?.field===field&&f?.value===value)?null:{field,value});setShowBrowse(false);};
   const switchTab=tab=>{setActiveTab(tab);setFilter(null);setSearch("");setShowAdd(false);setShowBrowse(false);setExpandedId(null);setStatusFilter("all");};
-  const saveSettings=(no,nh,nt)=>{
-    setOrder(no);setHidden(nh);setToken(nt);
+  const saveSettings=(no,nh,nt,ntmdb)=>{
+    setOrder(no);setHidden(nh);setToken(nt);setTmdbToken(ntmdb||"");
     if(!no.filter(k=>!nh.includes(k)).includes(activeTab))
       switchTab(no.find(k=>!nh.includes(k))||no[0]);
   };
@@ -1359,12 +1486,13 @@ function App(){
           <AddPanel tabKey={activeTab}
             onAdd={(rec,dest)=>{add(rec,dest);setShowAdd(false);}}
             onClose={()=>setShowAdd(false)}
-            discogsToken={token} allSuggestions={allSuggestions} catalog={catalog}/>
+            discogsToken={token} tmdbToken={tmdbToken}
+            allSuggestions={allSuggestions} catalog={catalog}/>
         )}
 
         {showSettings&&(
-          <SettingsPanel order={order} hidden={hidden} token={token} catalog={catalog}
-            onSave={(no,nh,nt)=>saveSettings(no,nh,nt)}
+          <SettingsPanel order={order} hidden={hidden} token={token} tmdbToken={tmdbToken} catalog={catalog}
+            onSave={(no,nh,nt,ntmdb)=>saveSettings(no,nh,nt,ntmdb)}
             onImport={handleImport}
             onClose={()=>setShowSettings(false)}/>
         )}
