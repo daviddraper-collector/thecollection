@@ -638,12 +638,19 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,tmdbToken,allSuggestions,ca
         const title=await upcToTitle(bc);
         if(!title){
           setLookup("error");
-          setMsg("Barcode not found in product database — search by title or enter manually.");
+          setMsg("Barcode not in database — type the title below to search TMDb.");
+          setTimeout(()=>tmdbSearchRef.current?.focus(),100);
           return;
         }
         setMsg(`Searching TMDb for "${title}"…`);
         const res=await tmdbSearch(title,tmdbToken);
-        if(!res.length){setLookup("error");setMsg(`No TMDb match for "${title}" — fill in manually.`);return;}
+        if(!res.length){
+          setLookup("error");
+          setMsg(`No TMDb match for "${title}" — try typing the title below.`);
+          setTmdbQuery(title);
+          setTimeout(()=>tmdbSearchRef.current?.focus(),100);
+          return;
+        }
         if(res.length===1){await applyTMDb(res[0]);}
         else{setResults(res);setLookup("pick-tmdb");}
       } else {
@@ -657,6 +664,7 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,tmdbToken,allSuggestions,ca
   };
 
   const [tmdbQuery, setTmdbQuery] = useState("");
+  const tmdbSearchRef = useRef();
 
   const handleTmdbSearch=async()=>{
     if(!tmdbQuery.trim()) return;
@@ -705,7 +713,7 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,tmdbToken,allSuggestions,ca
         {duplicate&&<div className="lookup-bar duplicate">⚠ Already in your catalog — {targetSchema.summaryLine(duplicate)}</div>}
         {isVideo&&tmdbToken&&(
           <div className="tmdb-search-row">
-            <input className="f-input tmdb-search-input" placeholder="Search TMDb by title…"
+            <input ref={tmdbSearchRef} className="f-input tmdb-search-input" placeholder="Search TMDb by title…"
               value={tmdbQuery} onChange={e=>setTmdbQuery(e.target.value)}
               onKeyDown={e=>e.key==="Enter"&&handleTmdbSearch()}/>
             <button className="btn-save sm" onClick={handleTmdbSearch}>Search</button>
