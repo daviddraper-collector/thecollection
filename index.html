@@ -668,6 +668,8 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,tmdbToken,allSuggestions,ca
       else{setResults(res);setLookup("pick-tmdb");}
     }catch(e){setLookup("error");setMsg(`Search failed: ${e.message}`);}
   };
+
+  const applyTMDb=async result=>{
     setLookup("loading");setMsg("Fetching cast and crew…");
     try{
       const [credits,rating]=await Promise.all([
