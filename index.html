@@ -656,7 +656,18 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,tmdbToken,allSuggestions,ca
     }catch(e){setLookup("error");setMsg(`Lookup failed: ${e.message}`);}
   };
 
-  const applyTMDb=async result=>{
+  const [tmdbQuery, setTmdbQuery] = useState("");
+
+  const handleTmdbSearch=async()=>{
+    if(!tmdbQuery.trim()) return;
+    setLookup("loading");setMsg(`Searching TMDb for "${tmdbQuery}"…`);
+    try{
+      const res=await tmdbSearch(tmdbQuery.trim(),tmdbToken);
+      if(!res.length){setLookup("error");setMsg(`No TMDb match for "${tmdbQuery}" — try a different title.`);return;}
+      if(res.length===1){setLookup(null);setMsg("");await applyTMDb(res[0]);}
+      else{setResults(res);setLookup("pick-tmdb");}
+    }catch(e){setLookup("error");setMsg(`Search failed: ${e.message}`);}
+  };
     setLookup("loading");setMsg("Fetching cast and crew…");
     try{
       const [credits,rating]=await Promise.all([
@@ -690,6 +701,14 @@ function AddPanel({tabKey,onAdd,onClose,discogsToken,tmdbToken,allSuggestions,ca
         {lookup==="loading"&&<div className="lookup-bar loading">{msg}</div>}
         {lookup==="error"  &&<div className="lookup-bar error">{msg}<button className="lookup-dismiss" onClick={()=>setLookup(null)}>✕</button></div>}
         {duplicate&&<div className="lookup-bar duplicate">⚠ Already in your catalog — {targetSchema.summaryLine(duplicate)}</div>}
+        {isVideo&&tmdbToken&&(
+          <div className="tmdb-search-row">
+            <input className="f-input tmdb-search-input" placeholder="Search TMDb by title…"
+              value={tmdbQuery} onChange={e=>setTmdbQuery(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&handleTmdbSearch()}/>
+            <button className="btn-save sm" onClick={handleTmdbSearch}>Search</button>
+          </div>
+        )}
         <div className="card-detail">
           {visibleFields.map(field=>(
             <div key={field.key} className="field-row">
@@ -1382,6 +1401,8 @@ function App(){
         .btn-scan:hover{border-color:var(--a);color:var(--a);}
         .btn-expand{background:none;border:none;color:var(--a);font-family:var(--M);font-size:11px;cursor:pointer;padding:8px 0 4px;display:block;opacity:.8;}
         .btn-expand:hover{opacity:1;}
+        .tmdb-search-row{display:flex;gap:8px;padding:8px 14px;border-bottom:1px solid var(--b1);background:var(--surf2);}
+        .tmdb-search-input{flex:1;}
         .lookup-bar{padding:8px 14px;font-size:11px;display:flex;align-items:center;gap:8px;}
         .lookup-bar.loading{background:var(--abg);color:var(--a);}
         .lookup-bar.error{background:var(--dbg);color:var(--danger);}
